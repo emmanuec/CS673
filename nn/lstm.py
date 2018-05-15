@@ -1,277 +1,112 @@
-import pandas as pd
-import numpy as np
-import os
-import random
-import re
-import shutil
-import time
 import matplotlib.pyplot as plt
+import numpy as np
 import tensorflow as tf
-from tensorflow.contrib.tensorboard.plugins import projector
 
 from nn.model import Model
+import nn.nnutils.layer_builder as build
+import util.data_extract as d_extract
 
 
 class LSTM(Model):
 
-    def __init__(self, sess, stock_count,
-                 lstm_size=128,
-                 num_layers=1,
-                 num_steps=30,
-                 input_size=1,
-                 logs_dir="logs",
-                 plots_dir="images"):
-        self.sess = sess
-        self.stock_count = stock_count
+    def __init__(self, file_name):
+        self.file_name = file_name
+        self.n_history = 20
+        n_features = 17
+        n_lstm_layers = 4
+        lstm_size = 128
+        dropout = 0.75
+        n_output = 1
 
-        self.lstm_size = lstm_size
-        self.num_layers = num_layers
-        self.num_steps = num_steps
-        self.input_size = input_size
+        self.input_values = build.lstm_input_layer(self.n_history, n_features)
+        self.expected_values = tf.placeholder(dtype=tf.float32, shape=[None])
 
-        self.logs_dir = logs_dir
-        self.plots_dir = plots_dir
+        lstm_hidden_layers = build.lstm_hidden_layers(self.input_values, n_lstm_layers, lstm_size, dropout)
 
-        self.build_graph()
+        transpose_layer = build.lstm_transpose(lstm_hidden_layers)
 
-    def build_graph(self):
-        """
-        The model asks for five things to be trained:
-        - learning_rate
-        - keep_prob: 1 - dropout rate
-        - symbols: a list of stock symbols associated with each sample
-        - input: training util X
-        - targets: training label y
-        """
-        # inputs.shape = (number of examples, number of input, dimension of each input).
-        self.learning_rate = tf.placeholder(tf.float32, None, name="learning_rate")
-        self.keep_prob = tf.placeholder(tf.float32, None, name="keep_prob")
+        # Output layer
+        self.output_layer = build.lstm_output_layer(transpose_layer, lstm_size, n_output)
 
-        # Stock symbols are mapped to integers.
-        self.symbols = tf.placeholder(tf.int32, [None, 1], name='stock_labels')
+        # Cost function
+        self.mse = build.regression_cost_function(self.output_layer, self.expected_values)
 
-        self.inputs = tf.placeholder(tf.float32, [None, self.num_steps, self.input_size], name="inputs")
-        self.targets = tf.placeholder(tf.float32, [None, self.input_size], name="targets")
+        # Optimizer
+        self.opt = build.adam_opt_training_component(self.mse, 0.0001)
 
-        def _create_one_cell():
-            lstm_cell = tf.contrib.rnn.LSTMCell(self.lstm_size, state_is_tuple=True)
-            lstm_cell = tf.contrib.rnn.DropoutWrapper(lstm_cell, output_keep_prob=self.keep_prob)
-            return lstm_cell
+    def train(self):
+        # Set up data
+        data_set = d_extract.get_time_data(self.n_history, self.file_name)
+        input_train = data_set.input_train
+        output_train = data_set.output_train
+        input_test = data_set.input_test
+        output_test = data_set.output_test
 
-        cell = tf.contrib.rnn.MultiRNNCell(
-            [_create_one_cell() for _ in range(self.num_layers)],
-            state_is_tuple=True
-        ) if self.num_layers > 1 else _create_one_cell()
+        # Make Session
+        net = tf.Session()
 
-        self.inputs_with_embed = tf.identity(self.inputs)
-        self.embed_matrix_summ = None
+        # Run initializer
+        net.run(tf.global_variables_initializer())
 
-        print
-        "inputs.shape:", self.inputs.shape
+        # Setup interactive plot
+        plt.ion()
+        fig = plt.figure()
+        ax1 = fig.add_subplot(111)
+        line1, = ax1.plot(output_test)
+        line2, = ax1.plot(output_test * 0.5)
+        ax1.set_title("Prediction vs Actual")
+        ax1.set_ylabel("Closing Price")
+        ax1.set_xlabel("Date")
+        ax1.set_xticklabels([])
+        ax1.set_yticklabels([])
+        plt.show()
 
-        # Run dynamic RNN
-        val, state_ = tf.nn.dynamic_rnn(cell, self.inputs_with_embed, dtype=tf.float32, scope="dynamic_rnn")
+        # Number of epochs and batch size
+        epochs = 500
+        batch_size = 50
 
-        # Before transpose, val.get_shape() = (batch_size, num_steps, lstm_size)
-        # After transpose, val.get_shape() = (num_steps, batch_size, lstm_size)
-        val = tf.transpose(val, [1, 0, 2])
+        best_mse = 1
+        best_epoch = 1
+        best_batch = 1
 
-        last = tf.gather(val, int(val.get_shape()[0]) - 1, name="lstm_state")
-        ws = tf.Variable(tf.truncated_normal([self.lstm_size, self.input_size]), name="w")
-        bias = tf.Variable(tf.constant(0.1, shape=[self.input_size]), name="b")
-        self.pred = tf.matmul(last, ws) + bias
+        for e in range(epochs):
 
-        # self.loss = -tf.reduce_sum(targets * tf.log(tf.clip_by_value(prediction, 1e-10, 1.0)))
-        self.loss = tf.reduce_mean(tf.square(self.pred - self.targets), name="loss_mse_train")
-        self.optim = tf.train.RMSPropOptimizer(self.learning_rate).minimize(self.loss, name="rmsprop_optim")
+            # Shuffle training util
+           # shuffle_indices = np.random.permutation(np.arange(len(output_train)))
+           # input_train = input_train[shuffle_indices]
+           # output_train = output_train[shuffle_indices]
 
-        # Separated from train loss.
-        self.loss_test = tf.reduce_mean(tf.square(self.pred - self.targets), name="loss_mse_test")
+            # Minibatch training
+            for i in range(0, len(output_train) // batch_size):
+                start = i * batch_size
+                batch_x = input_train[start:start + batch_size]
+                batch_y = output_train[start:start + batch_size]
+                # Run optimizer with batch
+                net.run(self.opt, feed_dict={self.input_values: batch_x, self.expected_values: batch_y})
 
-        self.loss_sum = tf.summary.scalar("loss_mse_train", self.loss)
-        self.loss_test_sum = tf.summary.scalar("loss_mse_test", self.loss_test)
-        self.learning_rate_sum = tf.summary.scalar("learning_rate", self.learning_rate)
-
-        self.t_vars = tf.trainable_variables()
-        self.saver = tf.train.Saver()
-
-    def train(self, dataset_list, config):
-        """
-        Args:
-            dataset_list (<StockDataSet>)
-            config (tf.app.flags.FLAGS)
-        """
-        assert len(dataset_list) > 0
-        self.merged_sum = tf.summary.merge_all()
-
-        # Set up the logs folder
-        self.writer = tf.summary.FileWriter(os.path.join("./logs", self.model_name))
-        self.writer.add_graph(self.sess.graph)
-
-        tf.global_variables_initializer().run()
-
-        # Merged test util of different stocks.
-        merged_test_X = []
-        merged_test_y = []
-        merged_test_labels = []
-
-        for label_, d_ in enumerate(dataset_list):
-            merged_test_X += list(d_.test_X)
-            merged_test_y += list(d_.test_y)
-            merged_test_labels += [[label_]] * len(d_.test_X)
-
-        merged_test_X = np.array(merged_test_X)
-        merged_test_y = np.array(merged_test_y)
-        merged_test_labels = np.array(merged_test_labels)
-
-        print
-        "len(merged_test_X) =", len(merged_test_X)
-        print
-        "len(merged_test_y) =", len(merged_test_y)
-        print
-        "len(merged_test_labels) =", len(merged_test_labels)
-
-        test_data_feed = {
-            self.learning_rate: 0.0,
-            self.keep_prob: 1.0,
-            self.inputs: merged_test_X,
-            self.targets: merged_test_y,
-            self.symbols: merged_test_labels,
-        }
-
-        global_step = 0
-
-        num_batches = sum(len(d_.train_X) for d_ in dataset_list) // config.batch_size
-        random.seed(time.time())
-
-        # Select samples for plotting.
-        sample_labels = range(min(config.sample_size, len(dataset_list)))
-        sample_indices = {}
-        for l in sample_labels:
-            sym = dataset_list[l].stock_sym
-            target_indices = np.array([
-                i for i, sym_label in enumerate(merged_test_labels)
-                if sym_label[0] == l])
-            sample_indices[sym] = target_indices
-        print
-        sample_indices
-
-        print
-        "Start training for stocks:", [d.stock_sym for d in dataset_list]
-        for epoch in range(config.max_epoch):
-            epoch_step = 0
-            learning_rate = config.init_learning_rate * (
-                    config.learning_rate_decay ** max(float(epoch + 1 - config.init_epoch), 0.0)
-            )
-
-            for label_, d_ in enumerate(dataset_list):
-                for batch_X, batch_y in d_.generate_one_epoch(config.batch_size):
-                    global_step += 1
-                    epoch_step += 1
-                    batch_labels = np.array([[label_]] * len(batch_X))
-                    train_data_feed = {
-                        self.learning_rate: learning_rate,
-                        self.keep_prob: config.keep_prob,
-                        self.inputs: batch_X,
-                        self.targets: batch_y,
-                        self.symbols: batch_labels,
-                    }
-                    train_loss, _, train_merged_sum = self.sess.run(
-                        [self.loss, self.optim, self.merged_sum], train_data_feed)
-                    self.writer.add_summary(train_merged_sum, global_step=global_step)
-
-                    if np.mod(global_step, len(dataset_list) * 200 / config.input_size) == 1:
-                        test_loss, test_pred = self.sess.run([self.loss_test, self.pred], test_data_feed)
-
-                        print
-                        "Step:%d [Epoch:%d] [Learning rate: %.6f] train_loss:%.6f test_loss:%.6f" % (
-                            global_step, epoch, learning_rate, train_loss, test_loss)
-
-                        # Plot samples
-                        for sample_sym, indices in sample_indices.iteritems():
-                            image_path = os.path.join(self.model_plots_dir, "{}_epoch{:02d}_step{:04d}.png".format(
-                                sample_sym, epoch, epoch_step))
-                            sample_preds = test_pred[indices]
-                            sample_truth = merged_test_y[indices]
-                            self.plot_samples(sample_preds, sample_truth, image_path, stock_sym=sample_sym)
-
-                        self.save(global_step)
-
-        final_pred, final_loss = self.sess.run([self.pred, self.loss], test_data_feed)
-
-        # Save the final model
-        self.save(global_step)
-        return final_pred
-
+                # Show progress
+                if np.mod(i, 5) == 0:
+                    # Prediction
+                    pred = net.run(self.output_layer, feed_dict={self.input_values: input_test})
+                    curr_mse = net.run(self.mse,
+                                       feed_dict={self.input_values: input_test, self.expected_values: output_test})
+                    if curr_mse < best_mse:
+                        best_mse = curr_mse
+                        best_epoch = e
+                        best_batch = i
+                    line2.set_ydata(pred)
+                    plt.title('Epoch ' + str(e) + ', Batch ' + str(i))
+                    file_name = "D:\\Files\\Box Sync\\classes\\Spring2018\\CS673\\final\\data\\img/LSTM_" + str(self.file_name) + "_epoch_" + str(e) + '_batch_' + str(i) + '.pdf'
+                    plt.savefig(file_name)
+                    plt.pause(0.01)
+        # Print final MSE after Training
+        mse_final = net.run(self.mse, feed_dict={self.input_values: input_test, self.expected_values: output_test})
+        print(mse_final)
+        print("File Name: " + str(self.file_name))
+        print("Best MSE: " + str(best_mse))
+        print("Best EPOCH: " + str(best_epoch))
+        print("Best BATCH: " + str(best_batch))
+        tf.reset_default_graph()
 
     def predict(self):
         pass
-
-    @property
-    def model_name(self):
-        name = "stock_rnn_lstm%d_step%d_input%d" % (
-            self.lstm_size, self.num_steps, self.input_size)
-
-        if self.embed_size > 0:
-            name += "_embed%d" % self.embed_size
-
-        return name
-
-    @property
-    def model_logs_dir(self):
-        model_logs_dir = os.path.join(self.logs_dir, self.model_name)
-        if not os.path.exists(model_logs_dir):
-            os.makedirs(model_logs_dir)
-        return model_logs_dir
-
-    @property
-    def model_plots_dir(self):
-        model_plots_dir = os.path.join(self.plots_dir, self.model_name)
-        if not os.path.exists(model_plots_dir):
-            os.makedirs(model_plots_dir)
-        return model_plots_dir
-
-    def save(self, step):
-        model_name = self.model_name + ".model"
-        self.saver.save(
-            self.sess,
-            os.path.join(self.model_logs_dir, model_name),
-            global_step=step
-        )
-
-    def load(self):
-        print(" [*] Reading checkpoints...")
-        ckpt = tf.train.get_checkpoint_state(self.model_logs_dir)
-        if ckpt and ckpt.model_checkpoint_path:
-            ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
-            self.saver.restore(self.sess, os.path.join(self.model_logs_dir, ckpt_name))
-            counter = int(next(re.finditer("(\d+)(?!.*\d)", ckpt_name)).group(0))
-            print(" [*] Success to read {}".format(ckpt_name))
-            return True, counter
-
-        else:
-            print(" [*] Failed to find a checkpoint")
-            return False, 0
-
-    def plot_samples(self, preds, targets, figname, stock_sym=None, multiplier=5):
-        def _flatten(seq):
-            return np.array([x for y in seq for x in y])
-
-        truths = _flatten(targets)[-200:]
-        preds = (_flatten(preds) * multiplier)[-200:]
-        days = range(len(truths))[-200:]
-
-        plt.figure(figsize=(12, 6))
-        plt.plot(days, truths, label='truth')
-        plt.plot(days, preds, label='pred')
-        plt.legend(loc='upper left', frameon=False)
-        plt.xlabel("day")
-        plt.ylabel("normalized price")
-        plt.ylim((min(truths), max(truths)))
-        plt.grid(ls='--')
-
-        if stock_sym:
-            plt.title(stock_sym + " | Last %d days in test" % len(truths))
-
-        plt.savefig(figname, format='png', bbox_inches='tight', transparent=True)
-        plt.close()

@@ -6,12 +6,6 @@ import tensorflow as tf
 from nn.model import Model
 import nn.nnutils.layer_builder as build
 import util.data_extract as d_extract
-# Input Layer
-# Change for the following:
-# Tensor -> [ batch_size, num_days, num_features]
-# batch_size -> 100
-# num_days -> 15 (bi-monthly)
-# num_features -> ~9
 
 
 def accuracy(actual, expected):
@@ -19,7 +13,7 @@ def accuracy(actual, expected):
             / actual.shape[0])
 
 
-class CNN(Model):
+class CNN6(Model):
 
     def __init__(self, file_name):
         self.file_name = file_name
@@ -31,6 +25,8 @@ class CNN(Model):
         conv_layer_specs = [
             (filter_num * 2, dropout),
             (filter_num * 4, dropout),
+            (filter_num * 8, dropout),
+            (filter_num * 8, dropout),
             (filter_num * 8, dropout)
         ]
 
@@ -50,6 +46,7 @@ class CNN(Model):
                 rectified_layer = build.cnn_lrelu_layer(conv_layers[-1])
 
                 # Convolutional Layer
+                # [batch, in_width, in_channels] => [batch, in_width/2, out_channels]
                 conv_layer = build.cnn_conv1d_layer(rectified_layer, out_channels)
 
                 conv_layers.append(conv_layer)
@@ -145,7 +142,7 @@ class CNN(Model):
                         best_batch = i
                     line2.set_ydata(pred)
                     plt.title('Epoch ' + str(e) + ', Batch ' + str(i))
-                    file_name = "D:\\Files\\Box Sync\\classes\\Spring2018\\CS673\\final\\data\\img/CNN_" + str(self.file_name) + "_epoch_" + str(e) + '_batch_' + str(i) + '.pdf'
+                    file_name = "D:\\Files\\Box Sync\\classes\\Spring2018\\CS673\\final\\data\\img/CNN7_" + str(self.file_name) + "_epoch_" + str(e) + '_batch_' + str(i) + '.pdf'
                     plt.savefig(file_name)
                     plt.pause(0.01)
         # Print final MSE after Training
