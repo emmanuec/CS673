@@ -62,40 +62,6 @@ class DataSet(object):
         self.__output_validation = output_validation
 
 
-def get_data_arch():
-    # Import util
-    data = pd.read_csv("D:\\Files\\Box Sync\\classes\\Spring2018\\CS673\\final\\data\\data_stocks_test3.csv")
-    # Drop date variable
-    data = data.drop(['DATE'], 1)
-    # Dimensions of dataset
-    n = data.shape[0]
-    p = data.shape[1]
-    # Make util a numpy array
-    data = data.values
-
-    # Training and test util
-    train_start = 0
-    train_end = int(np.floor(0.8 * n))
-    test_start = train_end
-    test_end = n
-    data_train = data[np.arange(train_start, train_end), :]
-    data_test = data[np.arange(test_start, test_end), :]
-
-    # Scale util
-    scaler = MinMaxScaler()
-    scaler.fit(data_train)
-    data_train = scaler.transform(data_train)
-    data_test = scaler.transform(data_test)
-
-    # Build DataSet
-    x_train = data_train[:, 1:]
-    y_train = data_train[:, 3]
-    x_test = data_test[:, 1:]
-    y_test = data_test[:, 3]
-
-    return DataSet(x_train, y_train, x_test, y_test, None, None)
-
-
 def get_data(file_name):
     # Import util
     data = pd.read_csv("D:\\Files\\Box Sync\\classes\\Spring2018\\CS673\\final\\data\\" + file_name)
